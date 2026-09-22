@@ -226,6 +226,37 @@ class CartIntegrationTest {
         assertThat(getJson("/cart/count", token).path("data").asInt()).isZero();
     }
 
+    @Test
+    @DisplayName("批量移除一次删掉多件，未传的商品不受影响，且能落库")
+    void removeBatchDeletesOnlyGivenProducts() throws Exception {
+        UserEntity user = newUser();
+        String token = login(user);
+        ProductEntity a = createProduct("批量删除A", 1, 100);
+        ProductEntity b = createProduct("批量删除B", 1, 100);
+        ProductEntity keep = createProduct("批量保留C", 1, 100);
+        add(token, a.getId(), 1);
+        add(token, b.getId(), 1);
+        add(token, keep.getId(), 1);
+
+        JsonNode after = deleteJson(
+                "/cart/items/batch?productIds=" + a.getId() + "," + b.getId(), token);
+
+        assertThat(after.path("data").path("totalCount").asInt())
+                .as("A、B 应被删掉，只剩 C").isEqualTo(1);
+        assertThat(onlyItem(after).path("productId").asLong()).isEqualTo(keep.getId());
+
+        // 传一个不存在的 id：不该报错，也不该顺手删掉别的行
+        JsonNode again = deleteJson("/cart/items/batch?productIds=987654321", token);
+        assertThat(again.path("data").path("totalCount").asInt())
+                .as("删不存在的东西是空操作，不能影响余下的行").isEqualTo(1);
+
+        // 批量移除也要推进版本号并置脏标记，否则这次删除永远落不了库
+        cartFlushTask.flushPending();
+        List<CartItemEntity> rows = rowsOf(user.getId());
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).getProductId()).isEqualTo(keep.getId());
+    }
+
     // ==================================================================
     // 失效商品
     // ==================================================================

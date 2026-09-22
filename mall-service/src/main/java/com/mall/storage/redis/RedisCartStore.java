@@ -200,6 +200,25 @@ public class RedisCartStore implements CartStore {
     }
 
     @Override
+    public void removeItems(Long userId, Collection<Long> productIds) {
+        if (productIds == null || productIds.isEmpty()) {
+            return;
+        }
+        String key = cartKey(userId);
+        // 去重后一次 HDEL：Redis 的 HDEL 支持多 field（2.0+，3.0.504 可用），
+        // 比循环调用少 N-1 次往返。field 名是商品 id，不可能撞到 __ver__。
+        Object[] fields = new LinkedHashSet<>(productIds).stream()
+                .map(String::valueOf)
+                .toArray();
+        Long removed = redis.opsForHash().delete(key, fields);
+        if (removed == null || removed == 0L) {
+            // 一个都没删到 —— 不做版本变更，避免刷库任务为一次空操作白跑
+            return;
+        }
+        bumpVersionAndMarkDirty(key, userId);
+    }
+
+    @Override
     public void clear(Long userId) {
         String key = cartKey(userId);
         // 刻意不用 DEL：删掉 key 就与"Redis 丢数据"无法区分了，

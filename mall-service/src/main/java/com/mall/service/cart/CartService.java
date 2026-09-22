@@ -4,6 +4,8 @@ import com.mall.api.dto.CartAddDTO;
 import com.mall.api.dto.CartSelectDTO;
 import com.mall.api.vo.CartVO;
 
+import java.util.Collection;
+
 /**
  * 购物车服务。
  *
@@ -38,6 +40,16 @@ public interface CartService {
 
     /** 移除单个商品。 */
     CartVO removeItem(Long userId, Long productId);
+
+    /**
+     * 批量移除。
+     *
+     * <p>合并成一次而不是让前端循环调用：循环版本会为每条商品各走一遍
+     * 「删字段 + 版本 +1 + 标记待落库」，N 件商品就是 N 次往返 + N 次 SADD。</p>
+     *
+     * @param productIds 目标商品；为空时视为无操作（<b>不是</b>清空 —— 清空请调 {@link #clear}）
+     */
+    CartVO removeItems(Long userId, Collection<Long> productIds);
 
     /** 清空整车。 */
     void clear(Long userId);

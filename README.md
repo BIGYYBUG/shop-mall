@@ -164,6 +164,7 @@ POST   /cart/items                    加入购物车（同商品累加）
 PUT    /cart/items/{productId}        设为指定数量
 PUT    /cart/items/selected           批量勾选（productIds 为空 = 整车全选 / 全不选）
 DELETE /cart/items/{productId}        移除单个
+DELETE /cart/items/batch?productIds=  批量移除（「删除选中」，逗号分隔）
 DELETE /cart/items                    清空
 
 GET    /admin/user/page | /{id}       用户管理
@@ -188,6 +189,10 @@ PUT    /seller/product/{id}/status    上下架（仅自己）
 POST   /file/upload                   图片上传
 POST   /ai/chat                       AI 对话（多轮）
 ```
+
+> 购物车的**每个写接口都返回整车 `CartVO`**（而不是 `void`）：前端做完操作直接整份替换本地状态，不需要「改完再 GET 一次」，合计金额与角标数量一次到位。
+>
+> 批量移除走 **query 参数而不是请求体**：DELETE 带 body 属未定义行为，部分网关/代理会直接丢掉它，且前端看不出异常。路径 `/cart/items/batch` 与 `/cart/items/{productId}` 不冲突 —— Spring 优先匹配字面量更具体的那个。
 
 **放行清单（改 `WebMvcConfig` 时别删）**：`/user/login`、`/user/register`、`/auth/**`、`/product/**`、`/uploads/**`。少放行 `/uploads/**`，前台 `<img>` 会 401 变破图。
 
@@ -318,7 +323,6 @@ bash docs/mvnw.sh test -Dtest=LlmClientTest           # AI 纯单元
 
 - [ ] **🔴 JWT 签名密钥硬编码**：`application.yml` 中 `mall.jwt.secret` 为明文常量。因仓库公开，任何人可用该密钥伪造令牌冒充 ADMIN。**上线前必须改为 `${JWT_SECRET:}` 环境变量注入**，并换成随机 32+ 字节密钥。
 - [ ] **订单未实现**（`OrderService` 仅接口占位）。购物车已可用并返回可结算的合计金额。
-- [ ] 购物车缺少**批量删除**接口，前端「删除选中」目前是按顺序逐个调用。购物车规模小（单用户几十行量级）时可接受；上百行后应补 `DELETE /cart/items/batch`。
 - [ ] 购物车自动落库存在固有窗口（默认 30s）：应用被 `kill -9` 时，最后一次未刷的改动会丢。要彻底消除需引入 MQ 或同步双写，留待阶段四。
-- [ ] 清理空占位文件 `mall-service/.../service/ai/InMemoryChatHistoryStore.java`。
+- [x] ~~清理空占位文件 `mall-service/.../service/ai/InMemoryChatHistoryStore.java`~~ **已删**（接口早已迁到 `com.mall.storage.ChatMemoryStore`）。
 - [ ] 前端三处「静默」缺陷（另一仓库）：登录 `redirect` 未生效、第三方登录按钮未渲染、`/register` 路由缺失。

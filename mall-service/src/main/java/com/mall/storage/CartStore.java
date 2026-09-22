@@ -93,6 +93,17 @@ public interface CartStore {
     void removeItem(Long userId, Long productId);
 
     /**
+     * 批量移除。语义与{@link #removeItem} 完全一致，只是合并成一次操作。
+     *
+     * <p>为什么值得单开一个方法：删除同样需要「删字段 + 版本 +1 + 标记待落库」三步，
+     * 让前端循环调 {@code removeItem} 会把这三步重复 N 遍，也会往 {@code mall:cart:dirty}
+     * 里重复 SADD N 次。批量接口把这 N 次收敛成一次。</p>
+     *
+     * @param productIds 目标商品；为空时不操作
+     */
+    void removeItems(Long userId, Collection<Long> productIds);
+
+    /**
      * 清空整车。
      *
      * <p><b>不是删 key</b> —— 见类注释第 3 点：删 key 会与"Redis 丢数据"混淆，

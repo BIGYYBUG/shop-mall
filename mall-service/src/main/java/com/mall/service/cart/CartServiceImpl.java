@@ -18,6 +18,7 @@ import org.springframework.stereotype.Service;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -89,6 +90,15 @@ public class CartServiceImpl implements CartService {
     public CartVO removeItem(Long userId, Long productId) {
         requireLogin(userId);
         cartStore.removeItem(userId, productId);
+        return getCart(userId);
+    }
+
+    @Override
+    public CartVO removeItems(Long userId, Collection<Long> productIds) {
+        requireLogin(userId);
+        if (productIds != null && !productIds.isEmpty()) {
+            cartStore.removeItems(userId, productIds);
+        }
         return getCart(userId);
     }
 

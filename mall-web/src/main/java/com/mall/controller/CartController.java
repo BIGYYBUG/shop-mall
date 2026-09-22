@@ -16,7 +16,10 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
 
 /**
  * 购物车接口。
@@ -76,6 +79,24 @@ public class CartController {
     @DeleteMapping("/items/{productId}")
     public Result<CartVO> remove(@PathVariable Long productId) {
         return Result.success("已从购物车移除", cartService.removeItem(UserContext.getUserId(), productId));
+    }
+
+    /**
+     * 批量移除（「删除选中」）。
+     *
+     * <p><b>为什么用 query 参数而不是请求体</b>：HTTP 规范里 DELETE 带 body 属于未定义行为，
+     * 部分网关/代理会直接把它丢掉，前端还看不出异常。放进 query 最稳妥。</p>
+     *
+     * <p><b>为什么不复用 {@code DELETE /cart/items}</b>：那条已经被"清空"占用了。
+     * 同一个 URI 用"参数在不在"区分两种语义（清空 vs 删几条），是很容易误用的歧义设计。</p>
+     *
+     * <p>路径 {@code /cart/items/batch} 与 {@code /cart/items/{productId}} 不冲突：
+     * Spring 的路径匹配优先选择字面量更具体的那个，{@code batch} 不会被当成 productId。</p>
+     */
+    @DeleteMapping("/items/batch")
+    public Result<CartVO> removeBatch(@RequestParam("productIds") List<Long> productIds) {
+        return Result.success("已移除选中商品",
+                cartService.removeItems(UserContext.getUserId(), productIds));
     }
 
     /** 清空购物车。 */
