@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mall.mapper.PermissionMapper">
+
+    <!--
+      ============================================================================
+      用户 → 角色 → 权限 四表连接
+      ============================================================================
+
+      这是 RBAC 里最核心的一条 SQL，拆开看它的链路：
+
+          mall_user_role        mall_role_permission
+       用户 ──────► 角色 ──────────► 权限
+                 (ur.role_id)      (rp.permission_id)
+
+      ⚠ 关键点一：为什么必须手写 deleted = 0？
+      ============================================================================
+      MyBatis-Plus 的逻辑删除是「框架在生成 SQL 时自动追加 WHERE deleted = 0」。
+      但这里是手写 SQL，框架不参与拼接 —— 必须自己写全每张表的过滤条件。
+      漏一个，禁用/已删除的角色或权限就会重新生效，这是最常见的权限越权来源。
+
+      ⚠ 关键点二：为什么用 DISTINCT？
+      ============================================================================
+      用户可能有多个角色，多个角色又可能拥有同一个权限。比如 ADMIN 和
+      运营角色都有 user:detail，连接后 user:detail 会出现两次。
+      不去重的话，返回的权限集合里会有重复项。
+
+      ⚠ 关键点三：为什么还要过滤 status？
+      ============================================================================
+      deleted 是「删掉了」，status 是「停用了」。停用的角色/权限不应该生效，
+      否则运维想临时摘掉某权限就只剩删数据一条路。
+    -->
+    <select id="selectCodesByUserId" resultType="java.lang.String">
+        SELECT DISTINCT p.code
+        FROM mall_user_role ur
+                 INNER JOIN mall_role r
+                            ON r.id = ur.role_id
+                                AND r.deleted = 0
+                                AND r.status = 1
+                 INNER JOIN mall_role_permission rp
+                            ON rp.role_id = r.id
+                 INNER JOIN mall_permission p
+                            ON p.id = rp.permission_id
+                                AND p.deleted = 0
+                                AND p.status = 1
+        WHERE ur.user_id = #{userId}
+    </select>
+
+</mapper>

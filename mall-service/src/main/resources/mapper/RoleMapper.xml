@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mall.mapper.RoleMapper">
+
+    <!-- 单个用户的角色编码 -->
+    <select id="selectCodesByUserId" resultType="java.lang.String">
+        SELECT r.code
+        FROM mall_user_role ur
+                 INNER JOIN mall_role r
+                            ON r.id = ur.role_id
+                                AND r.deleted = 0
+                                AND r.status = 1
+        WHERE ur.user_id = #{userId}
+    </select>
+
+    <!--
+      批量查询多个用户的角色编码。
+      一次 IN 查询取回全部，再由 Java 按 userId 分组 —— 避免 N+1。
+
+      <foreach> 是 MyBatis 的循环标签：
+        collection="userIds" → 对应 @Param("userIds") 的集合
+        item="uid"           → 每次循环的变量名
+        separator=","        → 元素之间用逗号分隔
+      展开后形如：WHERE ur.user_id IN (1,2,3)
+    -->
+    <select id="selectUserRoleCodes" resultType="com.mall.mapper.model.UserRoleCode">
+        SELECT ur.user_id AS user_id,
+               r.code      AS role_code
+        FROM mall_user_role ur
+                 INNER JOIN mall_role r
+                            ON r.id = ur.role_id
+                                AND r.deleted = 0
+                                AND r.status = 1
+        WHERE ur.user_id IN
+        <foreach collection="userIds" item="uid" open="(" separator="," close=")">
+            #{uid}
+        </foreach>
+        ORDER BY ur.user_id
+    </select>
+
+    <!--
+      持有某角色的全体用户 ID。
+
+      ⚠ 这里刻意不过滤 mall_role 的 deleted / status：
+        调用场景是「角色权限刚被改动，通知所有受影响的人刷新缓存」。
+        此时如果角色本身刚被停用或删除，恰恰更需要把缓存清掉，
+        加上 r.deleted = 0 反而会漏掉这批最该刷新的人。
+
+      ⚠ 但必须过滤 u.deleted = 0：
+        已注销账号不需要维护缓存，刷新它们纯属做无用功。
+        用 INNER JOIN 而不是 EXISTS —— 走 uk_user_role 索引即可，
+        数据量再大也不会退化成全表扫描。
+    -->
+    <select id="selectUserIdsByRoleId" resultType="java.lang.Long">
+        SELECT DISTINCT ur.user_id
+        FROM mall_user_role ur
+                 INNER JOIN mall_user u
+                            ON u.id = ur.user_id
+                                AND u.deleted = 0
+        WHERE ur.role_id = #{roleId}
+    </select>
+
+    <select id="countUsersByRoleId" resultType="long">
+        SELECT COUNT(DISTINCT ur.user_id)
+        FROM mall_user_role ur
+                 INNER JOIN mall_user u
+                            ON u.id = ur.user_id
+                                AND u.deleted = 0
+        WHERE ur.role_id = #{roleId}
+    </select>
+
+</mapper>

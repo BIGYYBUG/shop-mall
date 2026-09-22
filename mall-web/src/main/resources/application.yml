@@ -1,0 +1,124 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: mall-server
+
+  # MySQL 连接配置（占位，请按本机实际环境修改）
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/mall?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai
+    username: root
+    password: password
+  # Redis 连接配置（占位）
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      database: 0
+      timeout: 3000ms
+
+  # 文件上传限制。这两个值必须与 FileController 里的 MAX_IMAGE_BYTES 保持一致，
+  # 否则会出现"应用层说不能超过 5MB，但请求在 Tomcat 层就被拒了"的认知错位。
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 20MB
+
+mall:
+  # ------------------------------------------------------------------
+  # 大模型 / AI 配置（OpenAI 兼容协议，换通义 / Kimi / 本地 vLLM 只需改这两行）
+  # ------------------------------------------------------------------
+  ai:
+    # 总开关。关掉后 /ai/** 直接返回 503，不会发起任何外部调用
+    enabled: true
+
+    base-url: https://api.deepseek.com/chat/completions
+
+    # ⚠️ 只从环境变量读取，不留任何兜底默认值。
+    #
+    # 反面教材（本项目真实踩过）：写成 ${DEEPSEEK_API_KEY:sk-xxxx}，
+    # 冒号后面那串"兜底明文"会被原样提交进 Git —— 注释上写着"绝不写进代码库"，
+    # 但真正泄露 Key 的恰恰就是这个默认值。这是凭证泄露最典型的形态。
+    #
+    # 正确写法是结尾留空 `${DEEPSEEK_API_KEY:}`：取不到就是空串，
+    # 应用照样能启动；真调用时由 LlmClient 明确报「未配置 API Key」。
+    api-key: ${DEEPSEEK_API_KEY:}
+
+    # 可用：deepseek-v4-flash（快、便宜）| deepseek-v4-pro（推理强、贵）
+    # 停用：deepseek-chat / deepseek-reasoner —— 2026-07-24 起调用直接报错
+    model: deepseek-v4-flash
+
+    timeout-seconds: 60
+
+    # 温度：0 稳定、1 发散
+    temperature: 0.7
+
+  # JWT 配置
+  jwt:
+    # 签名密钥：HS256 要求至少 32 字节，生产环境务必改为环境变量注入
+    secret: mall-shopping-jwt-secret-key-change-me-in-production-2026
+    # 令牌有效期（分钟）
+    expire-minutes: 120
+
+  # ------------------------------------------------------------------
+  # 对象存储配置
+  # ------------------------------------------------------------------
+  storage:
+    # 总开关：local（本地磁盘，零配置即可跑通）| oss（阿里云对象存储）
+    type: local
+
+    local:
+      # 文件落盘根目录。相对路径以"应用启动时的工作目录"为基准 ——
+      # 这本身是个坑：从不同目录启动 java -jar，文件会散落到不同地方。
+      # 所以这里写绝对路径。
+      base-dir: E:/Projects/shopping-mall/uploads
+      # 对外暴露的 URL 前缀，需与静态资源映射一致
+      url-prefix: /uploads/
+
+    oss:
+      # ⚠️ 以下凭证一律通过环境变量注入，绝不写进代码库。
+      # 用 RAM 子账号的 AK，并只授予目标 Bucket 的读写权限，
+      # 不要图省事授予 AliyunOSSFullAccess。
+      endpoint: ${OSS_ENDPOINT:}
+      bucket: ${OSS_BUCKET:}
+      access-key-id: ${OSS_ACCESS_KEY_ID:}
+      access-key-secret: ${OSS_ACCESS_KEY_SECRET:}
+      # 统一前缀目录，便于按业务隔离与配置生命周期规则
+      dir: mall
+      # 绑定 CDN 或自定义域名后填这里，留空则自动拼 https://{bucket}.{endpoint}
+      url-prefix: ${OSS_URL_PREFIX:}
+
+
+  # 微信开放平台配置（OAuth2 授权码模式）
+  wechat:
+    # 开放平台网站应用 AppID / AppSecret，留空时微信登录接口会返回明确错误
+    app-id:
+    app-secret:
+    # 授权后微信回调到前端的地址，需与开放平台后台配置一致
+    redirect-uri: http://localhost:5173/oauth/callback
+    # 授权作用域：网站应用扫码登录固定为 snsapi_login
+    scope: snsapi_login
+
+# MyBatis-Plus 配置
+mybatis-plus:
+  # XML 映射文件位置。classpath*: 会扫描所有依赖 jar，因此
+  # 写在 mall-service 的 mapper XML 在 mall-web 启动时也能被加载
+  mapper-locations: classpath*:/mapper/**/*.xml
+  type-aliases-package: com.mall.entity
+  configuration:
+    map-underscore-to-camel-case: true
+    # 打印真实执行的 SQL，学习和排错阶段强烈建议打开，上线时换成 NoLoggingImpl
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+      # 逻辑删除不再在这里配置，改为在 BaseEntity.deleted 上标注 @TableLogic。
+      # 原因：全局配置是"隐式魔法"，看代码时不知道哪些表有逻辑删除；
+      # 注解写在实体上，一眼可见，且表格没有 deleted 列时不会被误伤。
+      # （mall_user_role / mall_role_permission 就没有 deleted 列）
+
+logging:
+  level:
+    com.mall: debug

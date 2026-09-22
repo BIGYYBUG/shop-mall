@@ -1,0 +1,38 @@
+# ============================================================
+#  mall-server  .gitignore
+# ============================================================
+
+# ---- 构建产物 ----
+# target/ 是 Maven 编译输出，每次 build 都会重新生成，
+# 入库只会制造大量无意义的 diff，而且会掩盖"依赖是否声明完整"的问题。
+target/
+*.class
+
+# ---- IDE ----
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+# ---- 日志 ----
+*.log
+logs/
+
+# ---- 操作系统 ----
+.DS_Store
+Thumbs.db
+
+# ---- 本地覆盖配置与凭证（绝不入库）----
+# 约定：真实凭证一律走环境变量或 application-local.yml（本文件已忽略）
+application-local.yml
+application-local.yaml
+application-local.properties
+*.local.yml
+.env
+.env.local
+
+# ---- 本地文件存储目录（mall.storage.type=local 时的落盘位置）----
+# 默认 base-dir 是本仓库之外，这里作为兜底守卫：
+# 万一有人改成仓库内相对路径，也不会把用户上传的图片提交上来。
+uploads/
