@@ -4,7 +4,7 @@
 
 **当前进度**：阶段一（单体落地）主体完成 —— 认证授权、卖家体系、商品域、文件存储、AI 对话已可用；购物车与订单为接口占位，尚未实现。
 
-前端项目为独立仓库（Vue 3 + Vite），见 [仓库与分支](#十仓库与分支)。
+前端项目为独立仓库：[`BIGYYBUG/shop-mall-frontedn`](https://github.com/BIGYYBUG/shop-mall-frontedn)（Vue 3 + Vite，含独立 README）。
 
 ---
 
