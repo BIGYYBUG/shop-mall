@@ -41,7 +41,7 @@ mall-web  ──►  mall-service  ──►  mall-api  ──►  mall-common
 | :--- | :--- | :--- |
 | `mall-common` | 基础设施 | 统一返回 `Result`、全局异常、`BaseEntity`、`@RequiresPermission` 注解、`PermissionChecker` 契约接口 |
 | `mall-api` | 服务契约 | DTO / VO、Feign 风格接口（无 `@FeignClient`，为拆分微服务预留） |
-| `mall-service` | 业务实现 | `user` / `rbac` / `shop` / `product` / `ai`，Mapper XML 在 `resources/mapper/` |
+| `mall-service` | 业务实现 | `user` / `rbac` / `shop` / `product` / `ai` / `cart`；存储能力统一在 `com.mall.storage`（`local` / `oss` / `memory` / `redis`），Mapper XML 在 `resources/mapper/` |
 | `mall-web` | Web 启动层 | 唯一可启动模块：启动类、Controller、拦截器、配置 |
 
 **为什么接口要放 `mall-common`**：Maven 依赖只能 `service → common`。`PermissionChecker` 的实现方在 service 层，而调用它的是 common 层的切面——接口若定义在 service，common 就引用不到，会直接形成循环依赖。这是依赖倒置的落地方式。
@@ -60,7 +60,8 @@ mall-web  ──►  mall-service  ──►  mall-api  ──►  mall-common
 | **商品域** | 单表 `mall_product`；平台侧全量管理 + 卖家侧仅管自己（数据归属隔离）；前台免登录浏览 |
 | **文件存储** | `FileStorageService` 抽象，`local` / `oss` 按配置切换（`@ConditionalOnProperty`） |
 | **AI 对话** | `POST /ai/chat`，OpenAI 兼容协议（DeepSeek），多轮上下文服务端拼接 + 窗口裁剪 |
-| **购物车 / 订单** | ⬜ `CartService` / `OrderService` 仅有接口占位 |
+| **购物车** | `/cart/**`，**Redis 为唯一真源 + 定时异步落库 MySQL**；实时算价、失效标记、勾选/全选与合计 |
+| **订单** | ⬜ `OrderService` 仅有接口占位 |
 
 ### 三层身份模型
 
@@ -88,6 +89,27 @@ mall-web  ──►  mall-service  ──►  mall-api  ──►  mall-common
 8. **权限码字典只读**：权限码与代码强耦合，只能随 SQL 脚本发布，界面不提供增删改；角色是运维数据，可自由增删改。有测试用反射扫描全部 `@RequiresPermission`，断言每个权限码都在字典内。
 9. **内置角色保护**：`mall_role.built_in = 1` 的 ADMIN / SELLER / USER 禁止删除、停用、改 code，防止「删掉 ADMIN 后无人能进后台」的不可自救事故。
 
+### 购物车：为什么用 Redis 做真源
+
+购物车是**高频写、低频读、可容忍极小概率丢失**的典型：改一次数量就写一次库，用 MySQL 直接扛会产生大量无意义的行更新。
+
+```
+写请求 ──► Redis Hash（真源，毫秒返回）
+             │  同时 SADD 进 mall:cart:dirty 脏集合
+             ▼
+        CartFlushTask（每 30s）批量刷进 mall_cart_item
+```
+
+几个必须守住的点：
+
+1. **「Redis 里没有」不等于「车是空的」**。Redis 会过期（30 天 TTL）、会重启、会被清库。查不到时必须回源 MySQL 重建，否则用户看到空车而数据其实完好——最容易被误判成「数据丢了」的假故障。刷库任务同理：Redis 里查不到该车时**直接跳过，绝不拿空车覆盖 MySQL**。
+2. **累加用 UPSERT，不加锁**：`INSERT ... ON DUPLICATE KEY UPDATE quantity = mall_cart_item.quantity + new.quantity`（`AS new` 行别名需 MySQL 8.0.19+，替代已废弃的 `VALUES()`）。必须写全限定表名，否则 `new.quantity` 与目标列重名会报 `Column 'quantity' in field list is ambiguous`。
+3. **刷库要防「旧快照覆盖新数据」**：Hash 里存一个 `__ver__` 版本号，刷库前后各读一次；不一致就保留脏标记，下一轮再刷。
+4. **合计只在服务端算**，且**只统计「已勾选 且 可购买」**的条目。前端拿 `price` 自己乘会引入浮点误差；把失效商品算进金额，用户结算时金额会突变。
+5. **失效商品打标记，不自动删除**（下架 / 零库存 / 商品被硬删）。静默删除会让用户觉得东西「莫名消失」，反而制造工单。
+6. **`userId` 一律取自令牌**，DTO 里根本没有这个字段——契约里不存在，比「服务端记得忽略它」更可靠。
+7. 该表**物理删除，不建 `deleted` 列**，实体因此**不继承 `BaseEntity`**（`@TableLogic` 会自动追加 `deleted = 0`，直接 `Unknown column` 报错）。
+
 ---
 
 ## 四、数据库
@@ -104,8 +126,9 @@ mall-web  ──►  mall-service  ──►  mall-api  ──►  mall-common
 | `06_rbac_complete.sql` | RBAC 管理闭环 + 逻辑删除语义改造 + `built_in`/`sort` |
 | `07_mall_shop.sql` | 卖家店铺表 + SELLER 权限码绑定 |
 | `08_mall_chat.sql` | AI 对话会话 / 消息表 |
+| `09_mall_cart.sql` | 购物车明细表（物理删除，无 `deleted` 列） |
 
-共 11 张表：`mall_user`、`mall_role`、`mall_permission`、`mall_user_role`、`mall_role_permission`、`mall_product`、`mall_shop`、`mall_chat_conversation`、`mall_chat_message`。
+共 10 张表：`mall_user`、`mall_role`、`mall_permission`、`mall_user_role`、`mall_role_permission`、`mall_product`、`mall_shop`、`mall_chat_conversation`、`mall_chat_message`、`mall_cart_item`。
 
 > 两张关联表**刻意不加 `deleted`**：取消授权语义是物理删除；若加逻辑删除，重新授权会撞 `uk_user_role`。
 
@@ -119,6 +142,7 @@ mall-web  ──►  mall-service  ──►  mall-api  ──►  mall-common
 | :--- | :--- |
 | `/user/**`、`/auth/**` | 免登录 / 仅登录 |
 | `/product/**`、`/uploads/**` | **免登录**（前台浏览 + 静态图片，在放行清单中） |
+| `/cart/**` | **仅登录**，且**没有一个 `@RequiresPermission`**——购物车是「我自己的东西」，靠 `userId` 取自令牌保证归属，不靠权限码 |
 | `/seller/**` | 卖家权限 `seller:*`（申请入驻、查看自己店铺仅需登录） |
 | `/admin/**` | `user:* role:* permission:* product:* shop:*` |
 | `/file/upload` | `file:upload`（对象存储是花钱资源，独立授权） |
@@ -133,6 +157,14 @@ GET    /auth/{source}/authorize-url   取授权地址
 POST   /auth/{source}/login           第三方登录换令牌
 
 GET    /product/page | /product/{id}  前台商品（免登录）
+
+GET    /cart                          购物车（含实时价格 / 失效标记 / 合计）
+GET    /cart/count                    角标数量（种类数，轻接口）
+POST   /cart/items                    加入购物车（同商品累加）
+PUT    /cart/items/{productId}        设为指定数量
+PUT    /cart/items/selected           批量勾选（productIds 为空 = 整车全选 / 全不选）
+DELETE /cart/items/{productId}        移除单个
+DELETE /cart/items                    清空
 
 GET    /admin/user/page | /{id}       用户管理
 PUT    /admin/user/{id}/roles         分配角色（全量覆盖）
@@ -214,9 +246,13 @@ bash docs/mvnw.sh clean test                          # 全量
 bash docs/mvnw.sh test -Dtest=RbacIntegrationTest     # RBAC
 bash docs/mvnw.sh test -Dtest=ShopIntegrationTest     # 卖家体系
 bash docs/mvnw.sh test -Dtest=ProductIntegrationTest  # 商品域
+bash docs/mvnw.sh test -Dtest=CartIntegrationTest     # 购物车
 bash docs/mvnw.sh test -Dtest=AiChatMemoryTest        # AI 多轮上下文
 bash docs/mvnw.sh test -Dtest=LlmClientTest           # AI 纯单元
 ```
+
+> 只跑单个测试类时，其它模块会因「没有匹配的测试」而失败退出。补一个开关即可：
+> `-Dsurefire.failIfNoSpecifiedTests=false`。
 
 > **改用 `docs/mvnw.sh` 而非裸 `mvn`**：某些受限环境中 `mvn` 启动脚本会因 `dirname` 不可用而拼不出 classpath，报 `ClassNotFoundException: plexus...Launcher`。
 > **改了方法签名 / 类结构后必须 `clean`**：增量编译会留下按旧签名编译的字节码，编译期不报错、只在运行期炸 `NoSuchMethodError`。
@@ -281,6 +317,8 @@ bash docs/mvnw.sh test -Dtest=LlmClientTest           # AI 纯单元
 ## 十一、已知问题 / 待办
 
 - [ ] **🔴 JWT 签名密钥硬编码**：`application.yml` 中 `mall.jwt.secret` 为明文常量。因仓库公开，任何人可用该密钥伪造令牌冒充 ADMIN。**上线前必须改为 `${JWT_SECRET:}` 环境变量注入**，并换成随机 32+ 字节密钥。
-- [ ] 购物车 / 订单未实现（`CartService`、`OrderService` 仅接口占位）。
+- [ ] **订单未实现**（`OrderService` 仅接口占位）。购物车已可用并返回可结算的合计金额。
+- [ ] 购物车缺少**批量删除**接口，前端「删除选中」目前是按顺序逐个调用。购物车规模小（单用户几十行量级）时可接受；上百行后应补 `DELETE /cart/items/batch`。
+- [ ] 购物车自动落库存在固有窗口（默认 30s）：应用被 `kill -9` 时，最后一次未刷的改动会丢。要彻底消除需引入 MQ 或同步双写，留待阶段四。
 - [ ] 清理空占位文件 `mall-service/.../service/ai/InMemoryChatHistoryStore.java`。
 - [ ] 前端三处「静默」缺陷（另一仓库）：登录 `redirect` 未生效、第三方登录按钮未渲染、`/register` 路由缺失。

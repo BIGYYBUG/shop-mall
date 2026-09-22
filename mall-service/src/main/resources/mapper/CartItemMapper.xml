@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mall.mapper.CartItemMapper">
+
+    <!--
+      ============================================================================
+      加购：UPSERT 原子累加
+      ============================================================================
+
+      ⚠ 关键点一：为什么必须一条 SQL，而不是"先 SELECT 再 UPDATE"
+      ============================================================================
+      两步写法：读出来 quantity = 1 → 内存加 1 → 写回 2。
+      两个并发加购请求会都读到 1，都写回 2 —— 正确结果应为 3，实际丢了 1 件。
+      交给 ON DUPLICATE KEY UPDATE 后，"判断是否存在 + 累加"由 InnoDB 在
+      走唯一索引 uk_user_product 时一并完成（命中重复键即转为 UPDATE 并加行锁），
+      不存在可以被并发插入的窗口。
+
+      ⚠ 关键点二：为什么用 VALUES (...) AS new，而不是 VALUES(col) 函数
+      ============================================================================
+      VALUES(col) 这种写法在 MySQL 8.0.20 起已被标记废弃，官方给出的替代就是
+      行别名（row alias，8.0.19+）。本项目用的是 MySQL 9.x，继续用 VALUES()
+      属于踩着废弃语法写新代码，迟早会炸。
+
+      ⚠ 关键点三：为什么左边累加要写成 mall_cart_item.quantity
+      ============================================================================
+      写成 `quantity = quantity + new.quantity` 会直接报
+          ERROR 1052 (23000): Column 'quantity' in field list is ambiguous
+      因为行别名 new 里也有同名的 quantity，不加表名限定，MySQL 无法判断
+      右边那个 quantity 指的是"表里的当前值"还是"本次要插入的新值"。
+      加上表名限定后语义唯一：mall_cart_item.quantity = 已存在那一行的值。
+      （本项目实测踩到，故留档。）
+
+      ⚠ 关键点四：为什么更新时要把 selected 置回 1
+      ============================================================================
+      用户此前把商品取消了勾选，过一阵又点了"加入购物车"—— 这个动作的语义是
+      "我要买它"，所以勾选状态应当回到 1，否则会出现"加了购物车但结算时看不到"。
+    -->
+    <insert id="upsertAdd">
+        INSERT INTO mall_cart_item (user_id, product_id, quantity, selected, create_time, update_time)
+        VALUES (#{userId}, #{productId}, #{quantity}, 1, NOW(), NOW()) AS new
+        ON DUPLICATE KEY UPDATE
+            quantity    = mall_cart_item.quantity + new.quantity,
+            selected    = 1,
+            update_time = NOW()
+    </insert>
+
+    <!--
+      ============================================================================
+      批量写入（Redis → MySQL 刷库）
+      ============================================================================
+
+      create_time 取的是「首次加购时间」，来自 Redis 里存的值；取不到才退回 NOW()。
+      IFNULL 是必需的：这两列都是 NOT NULL，而自定义 XML 不走 MyBatis-Plus 的
+      自动填充（MybatisFillHandler 只对 insert() 等内置方法生效），
+      传进来 null 就会直接报 Column 'create_time' cannot be null。
+    -->
+    <insert id="batchInsert">
+        INSERT INTO mall_cart_item (user_id, product_id, quantity, selected, create_time, update_time)
+        VALUES
+        <foreach collection="items" item="it" separator=",">
+            (#{it.userId}, #{it.productId}, #{it.quantity}, #{it.selected},
+            IFNULL(#{it.createTime}, NOW()), IFNULL(#{it.updateTime}, NOW()))
+        </foreach>
+    </insert>
+
+</mapper>
