@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mall.mapper.OrderMapper">
+
+    <!--
+      ============================================================================
+      订单状态流转：四个 CAS 语句
+      ============================================================================
+
+      ⚠ 为什么每一条都带「WHERE status = 期望的前置状态」
+      ============================================================================
+      这条条件就是订单状态机的全部实现。它同时解决三件事：
+
+        1) 并发 —— 买家点"取消"与系统"超时关单"可能同时发生。
+           两者都是 status = 0 → 4，只有先执行的那个能拿到 affected = 1，
+           另一个拿到 0。若不做这个条件，两边的回补库存都会执行，库存凭空增加。
+
+        2) 幂等 —— 用户重复点击"支付"或"取消"，第二次 affected = 0，
+           服务端据此抛出"订单状态已变更"，而不是静默成功或重复扣减。
+
+        3) 非法流转 —— 已发货的订单想取消，status = 0 不成立，天然被拒。
+           不需要在 Java 里写一串 if-else 去枚举"哪些状态能转到哪些状态"——
+           那种写法一旦漏一个分支就是线上事故，而这里漏不掉。
+
+      ⚠ 为什么不用「先 selectById 查状态、再判断、再 update」
+      ============================================================================
+      查与改之间是并发窗口。两个线程都查到 status = 0，都判定"可以取消"，
+      都执行 update —— 库存被回补两次。这就是本项目在购物车 UPSERT 上
+      已经吃过的同一类亏（丢更新），只是这次的结果更严重。
+
+      ⚠ 为什么手写 XML 里必须自己写 deleted = 0
+      ============================================================================
+      MyBatis-Plus 的 @TableLogic 只会改写它自己生成的那些 SQL（selectById、
+      update(entity, wrapper) 等）。手写 XML 是"原样发出"的，
+      框架不会替你补逻辑删除条件。漏写的后果不是报错，而是"把已删除的订单
+      也当有效订单处理"——属于静默越权，最难发现。
+    -->
+
+    <!-- 0 待支付 → 1 已支付 -->
+    <update id="casPay">
+        UPDATE mall_order
+        SET status   = 1,
+            pay_type = #{payType},
+            pay_time = NOW()
+        WHERE id = #{id}
+          AND status = 0
+          AND deleted = 0
+    </update>
+
+    <!-- 1 已支付 → 2 已发货 -->
+    <update id="casShip">
+        UPDATE mall_order
+        SET status    = 2,
+            ship_time = NOW()
+        WHERE id = #{id}
+          AND status = 1
+          AND deleted = 0
+    </update>
+
+    <!-- 2 已发货 → 3 已完成（买家确认收货） -->
+    <update id="casConfirm">
+        UPDATE mall_order
+        SET status      = 3,
+            finish_time = NOW()
+        WHERE id = #{id}
+          AND status = 2
+          AND deleted = 0
+    </update>
+
+    <!--
+      0 待支付 → 4 已取消
+      买家取消 / 超时关单 / 平台关闭三个入口共用这一条，只有 reason 不同。
+      共用是刻意的：「只能取消待支付订单」这条规则因此只有一处实现，
+      将来再加取消入口也不会漏掉校验。
+    -->
+    <update id="casCancel">
+        UPDATE mall_order
+        SET status        = 4,
+            cancel_time   = NOW(),
+            cancel_reason = #{reason}
+        WHERE id = #{id}
+          AND status = 0
+          AND deleted = 0
+    </update>
+
+    <!--
+      ============================================================================
+      超时未支付的订单（关单任务扫描）
+      ============================================================================
+
+      ⚠ 时间基准用数据库的 NOW()，不用应用传入的时间戳。
+      多实例部署时各机器时钟可能有偏差，把"是否超时"的判定权交给同一个时钟最稳。
+
+      ⚠ 条件写成 close_deadline <= NOW()，而不是
+         create_time < NOW() - INTERVAL 30 MINUTE。
+      后者是"函数作用在列上"，索引直接失效、退化成全表扫描；
+      前者是"列与常量比较"，能走 idx_status_deadline (status, deleted, close_deadline)。
+      这正是 close_deadline 这一冗余列存在的唯一理由。
+    -->
+    <select id="selectTimeoutCandidates" resultType="com.mall.entity.OrderEntity">
+        SELECT id, order_no, user_id, status, close_deadline
+        FROM mall_order
+        WHERE status = 0
+          AND deleted = 0
+          AND close_deadline &lt;= NOW()
+        ORDER BY id
+        LIMIT #{limit}
+    </select>
+
+</mapper>

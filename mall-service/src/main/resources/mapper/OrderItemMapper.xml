@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mall.mapper.OrderItemMapper">
+
+    <!--
+      ============================================================================
+      批量写入订单明细
+      ============================================================================
+
+      ── 为什么必须一条 INSERT 带多组 VALUES ──────────────────────────────────
+      MyBatis-Plus 的 BaseMapper 没有提供批量插入，而"逐行 insert"在
+      一单 20 件商品时会打出 20 条 SQL（20 次网络往返）。一条多值 INSERT
+      一次往返搞定，是订单落库这种"必须整体成功"的场景最经济的写法。
+
+      ── ⚠ 为什么 create_time / update_time 要显式写 NOW() ────────────────
+      自定义 XML 不走 MyBatis-Plus 的自动填充 —— MybatisFillHandler 只对
+      insert() / updateById() 这类内置方法生效。而这两列都是 NOT NULL，
+      传 null 进去会直接报 Column 'create_time' cannot be null。
+      （同一个坑在 CartItemMapper.xml 的 batchInsert 上已经踩过一次。）
+
+      ── 为什么价格、名称、小计由参数传入而不是在 SQL 里 join 商品表 ────────
+      这些值必须在下单那一刻"冻结"。若在插入时从 mall_product 现取，
+      下单过程中商品恰好改价，就会写出一个"金额与下单页面对不上"的订单。
+      值由 service 层从已校验过的商品快照传入，SQL 只负责落库。
+    -->
+    <insert id="batchInsert">
+        INSERT INTO mall_order_item (order_id, product_id, seller_id, product_name, product_cover_key,
+                                     price, quantity, subtotal, create_time, update_time)
+        VALUES
+        <foreach collection="items" item="it" separator=",">
+            (#{it.orderId}, #{it.productId}, #{it.sellerId}, #{it.productName}, #{it.productCoverKey},
+            #{it.price}, #{it.quantity}, #{it.subtotal}, NOW(), NOW())
+        </foreach>
+    </insert>
+
+    <!--
+      ============================================================================
+      按订单 ID 批量取明细（列表页与详情页共用）
+      ============================================================================
+
+      ⚠ 手写 XML 必须自己写 deleted = 0 —— @TableLogic 只改写框架自己生成的 SQL，
+         手写语句是原样发出的。漏写会把逻辑删除的历史明细一并查出来。
+
+      ⚠ 用 IN 一次查一批，绝不循环单查 —— 一页 10 条订单循环查明细就是 N+1。
+    -->
+    <select id="selectByOrderIds" resultType="com.mall.entity.OrderItemEntity">
+        SELECT id, order_id, product_id, seller_id, product_name, product_cover_key,
+               price, quantity, subtotal, create_time
+        FROM mall_order_item
+        WHERE deleted = 0
+          AND order_id IN
+        <foreach collection="orderIds" item="oid" open="(" separator="," close=")">
+            #{oid}
+        </foreach>
+        ORDER BY id
+    </select>
+
+</mapper>
