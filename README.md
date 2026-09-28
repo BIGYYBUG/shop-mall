@@ -2,7 +2,7 @@
 
 > 一个以**后端深度**为目标的电商后端：单体多模块起步，把 RBAC、卖家体系、商品域、文件存储、AI 对话全部打通，并在结构上预留 **Spring Cloud Alibaba** 微服务升级路径。
 
-**当前进度**：阶段一（单体落地）主体完成 —— 认证授权、卖家体系、商品域、文件存储、AI 对话已可用；购物车与订单为接口占位，尚未实现。
+**当前进度**：阶段一（单体落地）主体完成 —— 认证授权、卖家体系、商品域、文件存储、AI 对话、购物车、订单均已可用。前端订单页尚未开发。
 
 前端项目为独立仓库：[`BIGYYBUG/shop-mall-frontedn`](https://github.com/BIGYYBUG/shop-mall-frontedn)（Vue 3 + Vite，含独立 README）。
 
@@ -61,7 +61,7 @@ mall-web  ──►  mall-service  ──►  mall-api  ──►  mall-common
 | **文件存储** | `FileStorageService` 抽象，`local` / `oss` 按配置切换（`@ConditionalOnProperty`） |
 | **AI 对话** | `POST /ai/chat`，OpenAI 兼容协议（DeepSeek），多轮上下文服务端拼接 + 窗口裁剪 |
 | **购物车** | `/cart/**`，**Redis 为唯一真源 + 定时异步落库 MySQL**；实时算价、失效标记、勾选/全选与合计 |
-| **订单** | ⬜ `OrderService` 仅有接口占位 |
+| **订单** | `/order/**`（买家）+ `/admin/order/**`（平台）；**DB 为唯一真源**（审计凭证，刻意不缓存）；条件 UPDATE 扣库存防超卖、SQL CAS 状态机保证幂等、明细存商品与价格快照、超时自动关单回补库存 |
 
 ### 三层身份模型
 
@@ -127,10 +127,12 @@ mall-web  ──►  mall-service  ──►  mall-api  ──►  mall-common
 | `07_mall_shop.sql` | 卖家店铺表 + SELLER 权限码绑定 |
 | `08_mall_chat.sql` | AI 对话会话 / 消息表 |
 | `09_mall_cart.sql` | 购物车明细表（物理删除，无 `deleted` 列） |
+| `10_mall_order.sql` | 订单主表 + 明细表（逻辑删除，存商品与价格快照）+ 4 条 `order:*` 权限码 |
 
-共 10 张表：`mall_user`、`mall_role`、`mall_permission`、`mall_user_role`、`mall_role_permission`、`mall_product`、`mall_shop`、`mall_chat_conversation`、`mall_chat_message`、`mall_cart_item`。
+共 12 张表：`mall_user`、`mall_role`、`mall_permission`、`mall_user_role`、`mall_role_permission`、`mall_product`、`mall_shop`、`mall_chat_conversation`、`mall_chat_message`、`mall_cart_item`、`mall_order`、`mall_order_item`。
 
 > 两张关联表**刻意不加 `deleted`**：取消授权语义是物理删除；若加逻辑删除，重新授权会撞 `uk_user_role`。
+> 购物车与订单的删除语义**刻意相反**：购物车物理删（不是账，用户点删就是要它消失）；订单逻辑删（交易凭证，必须可追溯）。
 
 ---
 
@@ -143,8 +145,9 @@ mall-web  ──►  mall-service  ──►  mall-api  ──►  mall-common
 | `/user/**`、`/auth/**` | 免登录 / 仅登录 |
 | `/product/**`、`/uploads/**` | **免登录**（前台浏览 + 静态图片，在放行清单中） |
 | `/cart/**` | **仅登录**，且**没有一个 `@RequiresPermission`**——购物车是「我自己的东西」，靠 `userId` 取自令牌保证归属，不靠权限码 |
+| `/order/**` | **仅登录**，同样**零权限码**——买家只管自己的订单，归属由令牌钉死（归属不符返回 **404 而非 403**，避免泄露单号真实存在） |
 | `/seller/**` | 卖家权限 `seller:*`（申请入驻、查看自己店铺仅需登录） |
-| `/admin/**` | `user:* role:* permission:* product:* shop:*` |
+| `/admin/**` | `user:* role:* permission:* product:* shop:* order:*` |
 | `/file/upload` | `file:upload`（对象存储是花钱资源，独立授权） |
 | `/ai/chat` | **必须登录**（按 token 计费，刻意不放行） |
 
@@ -167,6 +170,14 @@ DELETE /cart/items/{productId}        移除单个
 DELETE /cart/items/batch?productIds=  批量移除（「删除选中」，逗号分隔）
 DELETE /cart/items                    清空
 
+POST   /order/checkout                购物车结算（只结算「已勾选且可购买」的条目）
+POST   /order/buy-now                 直接购买（不经过购物车）
+GET    /order/list?status=            我的订单分页（不含明细）
+GET    /order/{orderNo}               我的订单详情（含明细）
+POST   /order/{orderNo}/pay           模拟支付（仅待支付）
+POST   /order/{orderNo}/cancel        取消订单（仅待支付）
+POST   /order/{orderNo}/confirm       确认收货（仅已发货）
+
 GET    /admin/user/page | /{id}       用户管理
 PUT    /admin/user/{id}/roles         分配角色（全量覆盖）
 PUT    /admin/user/{id}/status        启用/禁用
@@ -178,6 +189,9 @@ GET    /admin/shop/page | /{id}       店铺管理
 PUT    /admin/shop/{id}/audit         店铺审核
 GET    /admin/product/page | /{id}    商品管理
 PUT    /admin/product/{id}/status     上下架
+GET    /admin/order/page | /{orderNo} 订单管理（平台视角，不限归属）
+POST   /admin/order/{orderNo}/ship    发货（仅已支付）
+POST   /admin/order/{orderNo}/close   强制关闭（仅待支付）
 
 GET    /seller/shop/mine              我的店铺
 POST   /seller/shop/apply             提交入驻申请
@@ -193,6 +207,8 @@ POST   /ai/chat                       AI 对话（多轮）
 > 购物车的**每个写接口都返回整车 `CartVO`**（而不是 `void`）：前端做完操作直接整份替换本地状态，不需要「改完再 GET 一次」，合计金额与角标数量一次到位。
 >
 > 批量移除走 **query 参数而不是请求体**：DELETE 带 body 属未定义行为，部分网关/代理会直接丢掉它，且前端看不出异常。路径 `/cart/items/batch` 与 `/cart/items/{productId}` 不冲突 —— Spring 优先匹配字面量更具体的那个。
+>
+> 订单的**每个写接口同样返回完整 `OrderVO`（含明细）**，道理与购物车一致：点完「支付」前端一轮就能刷新状态、时间戳与明细，不必再发一次 GET。订单的**状态冲突返回 409**（而非 400）——「你当前的状态不允许这个操作」与「参数传错了」是两回事。结算请求体里**没有商品 ID、也没有金额**：结算哪些商品由服务端按购物车勾选状态判定，金额一律服务端算。
 
 **放行清单（改 `WebMvcConfig` 时别删）**：`/user/login`、`/user/register`、`/auth/**`、`/product/**`、`/uploads/**`。少放行 `/uploads/**`，前台 `<img>` 会 401 变破图。
 
@@ -298,7 +314,7 @@ bash docs/mvnw.sh test -Dtest=LlmClientTest           # AI 纯单元
 
 | 阶段 | 内容 | 状态 |
 | :--- | :--- | :--- |
-| 一 | 单体落地：认证授权、卖家体系、商品域、文件存储、AI 对话 | 🟡 主体完成（缺购物车、订单） |
+| 一 | 单体落地：认证授权、卖家体系、商品域、文件存储、AI 对话、购物车、订单 | ✅ 后端完成（前端订单页待开发） |
 | 二 | 注册与发现：部署 Nacos，拆出 `mall-user` | ⬜ |
 | 三 | 网关与远程调用：Gateway + OpenFeign（`mall-api` 已备契约层） | ⬜ |
 | 四 | 配置与容错：Nacos Config、Sentinel | ⬜ |
@@ -322,7 +338,8 @@ bash docs/mvnw.sh test -Dtest=LlmClientTest           # AI 纯单元
 ## 十一、已知问题 / 待办
 
 - [ ] **🔴 JWT 签名密钥硬编码**：`application.yml` 中 `mall.jwt.secret` 为明文常量。因仓库公开，任何人可用该密钥伪造令牌冒充 ADMIN。**上线前必须改为 `${JWT_SECRET:}` 环境变量注入**，并换成随机 32+ 字节密钥。
-- [ ] **订单未实现**（`OrderService` 仅接口占位）。购物车已可用并返回可结算的合计金额。
+- [x] ~~订单未实现~~ **已实现**（`10_mall_order.sql` + `/order/**` + `/admin/order/**`，17 例集成测试）。**仍缺**：前端订单页。
 - [ ] 购物车自动落库存在固有窗口（默认 30s）：应用被 `kill -9` 时，最后一次未刷的改动会丢。要彻底消除需引入 MQ 或同步双写，留待阶段四。
+- [ ] 订单超时关单同样依赖定时扫描（默认 1 分钟一轮），关单时刻最多滞后一个扫描周期；且 `/order/**` 的下单锁与 `close_deadline` 判定都在应用侧，多实例部署时关单会重复尝试（靠 CAS 保证只成功一次，结果正确但有重复劳动）。消除需分布式锁或 MQ 延迟消息，留待阶段四。
 - [x] ~~清理空占位文件 `mall-service/.../service/ai/InMemoryChatHistoryStore.java`~~ **已删**（接口早已迁到 `com.mall.storage.ChatMemoryStore`）。
-- [ ] 前端三处「静默」缺陷（另一仓库）：登录 `redirect` 未生效、第三方登录按钮未渲染、`/register` 路由缺失。
+- [x] ~~前端三处「静默」缺陷（另一仓库）：登录 `redirect` 未生效、第三方登录按钮未渲染、`/register` 路由缺失~~ **已修**（前端 `d1a04f0`）。
